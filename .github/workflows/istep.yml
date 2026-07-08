@@ -1,0 +1,42 @@
+name: iStep to Google Sheets
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  run-istep-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Run iStep bot
+        run: npm start
+        env:
+          ISTEP_LOGIN_URL: ${{ secrets.ISTEP_LOGIN_URL }}
+          ISTEP_REPORT_URL: ${{ secrets.ISTEP_REPORT_URL }}
+          ISTEP_USERNAME: ${{ secrets.ISTEP_USERNAME }}
+          ISTEP_PASSWORD: ${{ secrets.ISTEP_PASSWORD }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+
+      - name: Upload error screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: istep-error-screenshot
+          path: istep-error.png
+          if-no-files-found: ignore
