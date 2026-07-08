@@ -60,6 +60,15 @@ function parseDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function parseIstepFileTime(rowText) {
+  const match = clean(rowText).match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/);
+
+  if (!match) return null;
+
+  const d = new Date(`${match[1]}T${match[2]}`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function isExcludedSubject(subject) {
   const s = clean(subject).toLowerCase();
 
@@ -191,11 +200,23 @@ function getMtdRangeForIstep() {
   const from = new Date(now.getFullYear(), now.getMonth(), 1);
   const to = now;
 
+  const fromDateValue = `${from.getFullYear()}-${pad2(from.getMonth() + 1)}-${pad2(from.getDate())}`;
+  const toDateValue = `${to.getFullYear()}-${pad2(to.getMonth() + 1)}-${pad2(to.getDate())}`;
+
+  const fromText = `${pad2(from.getMonth() + 1)}/${pad2(from.getDate())}/${from.getFullYear()}`;
+  const toText = `${pad2(to.getMonth() + 1)}/${pad2(to.getDate())}/${to.getFullYear()}`;
+
+  const fromFileText = `${pad2(from.getDate())}-${pad2(from.getMonth() + 1)}-${from.getFullYear()}`;
+  const toFileText = `${pad2(to.getDate())}-${pad2(to.getMonth() + 1)}-${to.getFullYear()}`;
+
+  const expectedExportName = `Overall_Evaluation_Tickets_From-${fromFileText}_To-${toFileText}.xlsx`;
+
   return {
-    fromDateValue: `${from.getFullYear()}-${pad2(from.getMonth() + 1)}-${pad2(from.getDate())}`,
-    toDateValue: `${to.getFullYear()}-${pad2(to.getMonth() + 1)}-${pad2(to.getDate())}`,
-    fromText: `${pad2(from.getMonth() + 1)}/${pad2(from.getDate())}/${from.getFullYear()}`,
-    toText: `${pad2(to.getMonth() + 1)}/${pad2(to.getDate())}/${to.getFullYear()}`
+    fromDateValue,
+    toDateValue,
+    fromText,
+    toText,
+    expectedExportName
   };
 }
 
@@ -465,6 +486,8 @@ async function selectReportAndExport(page) {
 
   console.log('Clicking Export...');
 
+  const exportClickedAt = new Date();
+
   const clickedExport = await clickFirstAvailable(
     page,
     [
@@ -477,16 +500,19 @@ async function selectReportAndExport(page) {
 
   if (!clickedExport) throw new Error('Export button not found.');
 
-  console.log('Export clicked. Waiting for file to generate...');
+  console.log(`Export clicked at ${exportClickedAt.toISOString()}. Waiting for file to generate...`);
   await page.waitForTimeout(20000);
+
+  return exportClickedAt;
 }
 
-async function downloadLatestExport(page) {
+async function downloadLatestExport(page, expectedExportName, exportClickedAt) {
   console.log('Opening File Management...');
   await page.goto(ISTEP_FILES_URL, { waitUntil: 'networkidle' });
 
-  const expectedName = 'Overall_Evaluation_Tickets';
-  const maxAttempts = 18;
+  console.log(`Waiting for exact export file: ${expectedExportName}`);
+
+  const maxAttempts = 30;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(`Checking export file attempt ${attempt}/${maxAttempts}...`);
@@ -496,44 +522,72 @@ async function downloadLatestExport(page) {
     const rows = page.locator('table tbody tr');
     const count = await rows.count();
 
+    let bestMatch = null;
+    let bestMatchTime = null;
+
     for (let i = 0; i < count; i++) {
       const row = rows.nth(i);
       const rowText = clean(await row.innerText().catch(() => ''));
 
-      if (rowText.includes(expectedName)) {
-        console.log(`Found export row: ${rowText}`);
+      if (!rowText.includes(expectedExportName)) {
+        continue;
+      }
 
-        const downloadCandidates = [
-          row.locator('a').last(),
-          row.locator('button').last(),
-          row.locator('i').last()
-        ];
+      const fileTime = parseIstepFileTime(rowText);
 
-        for (const candidate of downloadCandidates) {
-          if (await candidate.count()) {
-            const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
-            await candidate.click({ force: true });
+      console.log(`Found matching name row: ${rowText}`);
+      console.log(`Parsed file time: ${fileTime ? fileTime.toISOString() : 'unknown'}`);
 
-            const download = await downloadPromise;
-            const path = './istep-export.xlsx';
+      const bufferMs = 2 * 60 * 1000;
 
-            await download.saveAs(path);
+      const isNewEnough =
+        !fileTime ||
+        fileTime.getTime() >= exportClickedAt.getTime() - bufferMs;
 
-            console.log(`Downloaded export to ${path}`);
-            return path;
-          }
-        }
+      if (!isNewEnough) {
+        console.log('Skipping matching file because it looks older than this export run.');
+        continue;
+      }
 
-        throw new Error('Found export row but could not click download icon.');
+      if (!bestMatch || (fileTime && (!bestMatchTime || fileTime > bestMatchTime))) {
+        bestMatch = row;
+        bestMatchTime = fileTime;
       }
     }
 
-    console.log('File not ready yet. Refreshing File Management...');
+    if (bestMatch) {
+      console.log(`Downloading matched export: ${expectedExportName}`);
+
+      const downloadCandidates = [
+        bestMatch.locator('a').last(),
+        bestMatch.locator('button').last(),
+        bestMatch.locator('i').last()
+      ];
+
+      for (const candidate of downloadCandidates) {
+        if (await candidate.count()) {
+          const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
+          await candidate.click({ force: true });
+
+          const download = await downloadPromise;
+          const path = './istep-export.xlsx';
+
+          await download.saveAs(path);
+
+          console.log(`Downloaded export to ${path}`);
+          return path;
+        }
+      }
+
+      throw new Error('Found matching export row but could not click download icon.');
+    }
+
+    console.log('Correct export is not ready yet. Refreshing File Management...');
     await page.reload({ waitUntil: 'networkidle' }).catch(() => {});
     await page.waitForTimeout(16000);
   }
 
-  throw new Error('Latest Overall Evaluation export did not appear after waiting.');
+  throw new Error(`Correct export did not appear after waiting: ${expectedExportName}`);
 }
 
 function parseExportFile(filePath) {
@@ -858,9 +912,13 @@ async function main() {
 
   try {
     await login(page);
-    await selectReportAndExport(page);
 
-    const filePath = await downloadLatestExport(page);
+    const exportClickedAt = await selectReportAndExport(page);
+    const { expectedExportName } = getMtdRangeForIstep();
+
+    console.log(`Expected export name for this run: ${expectedExportName}`);
+
+    const filePath = await downloadLatestExport(page, expectedExportName, exportClickedAt);
     const rows = parseExportFile(filePath);
 
     if (!rows.length) {
