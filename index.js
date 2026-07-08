@@ -171,9 +171,15 @@ async function clickFirstAvailable(page, selectors, label) {
     const locator = page.locator(selector).first();
 
     if (await locator.count()) {
-      await locator.click({ force: true });
-      console.log(`Clicked ${label} using selector: ${selector}`);
-      return true;
+      try {
+        if (await locator.isVisible().catch(() => false)) {
+          await locator.click({ force: true });
+          console.log(`Clicked ${label} using selector: ${selector}`);
+          return true;
+        }
+      } catch (err) {
+        console.log(`Could not click ${label} using selector ${selector}: ${err.message}`);
+      }
     }
   }
 
@@ -262,66 +268,97 @@ async function setMtdDateRange(page) {
 
   console.log(`Setting iStep date range to MTD: ${fromText} → ${toText}`);
 
-  const opened = await clickFirstAvailable(
-    page,
-    [
-      'text=Last 24 Hours',
-      'button:has-text("Last 24 Hours")',
-      'input[value="Last 24 Hours"]',
-      'div:has-text("Last 24 Hours")'
-    ],
-    'date dropdown'
+  let customSelected = false;
+
+  const selects = page.locator('select');
+  const selectCount = await selects.count();
+
+  for (let i = 0; i < selectCount; i++) {
+    const select = selects.nth(i);
+
+    const options = await select.locator('option').evaluateAll(opts =>
+      opts.map(o => ({
+        label: (o.textContent || '').trim(),
+        value: o.getAttribute('value') || ''
+      }))
+    ).catch(() => []);
+
+    const hasLast24 = options.some(o => o.label.toLowerCase().includes('last 24 hours'));
+    const customOption = options.find(o =>
+      o.label.toLowerCase().includes('custom')
+    );
+
+    if (hasLast24 && customOption) {
+      console.log(`Selecting date range option: ${customOption.label}`);
+
+      try {
+        await select.selectOption(customOption.value || { label: customOption.label });
+      } catch {
+        await select.selectOption({ label: customOption.label });
+      }
+
+      await select.dispatchEvent('change').catch(() => {});
+      customSelected = true;
+      break;
+    }
+  }
+
+  if (!customSelected) {
+    console.log('Could not select Custom Date from native select. Trying visible custom date option...');
+
+    customSelected = await clickFirstAvailable(
+      page,
+      [
+        'button:has-text("Custom Date")',
+        'button:has-text("Custom")',
+        'a:has-text("Custom Date")',
+        'a:has-text("Custom")',
+        'text=Custom Date',
+        'text=Custom'
+      ],
+      'Custom Date'
+    );
+  }
+
+  if (!customSelected) {
+    throw new Error('Could not select Custom Date range.');
+  }
+
+  await page.waitForTimeout(2000);
+
+  const allDateInputs = page.locator(
+    'input[placeholder="mm/dd/yyyy"], input[type="date"], .modal input[type="text"], input[name*="from"], input[name*="to"], input[id*="from"], input[id*="to"]'
   );
 
-  if (!opened) {
-    console.log('Could not click Last 24 Hours directly. Continuing to look for custom date modal/options...');
+  const visibleInputs = [];
+  const inputCount = await allDateInputs.count();
+
+  for (let i = 0; i < inputCount; i++) {
+    const input = allDateInputs.nth(i);
+
+    const visible = await input.isVisible().catch(() => false);
+    const enabled = await input.isEnabled().catch(() => false);
+
+    if (visible && enabled) {
+      visibleInputs.push(input);
+    }
   }
 
-  await page.waitForTimeout(1500);
-
-  const customClicked = await clickFirstAvailable(
-    page,
-    [
-      'text=Custom Date',
-      'text=Custom',
-      'button:has-text("Custom Date")',
-      'button:has-text("Custom")',
-      'a:has-text("Custom Date")',
-      'a:has-text("Custom")'
-    ],
-    'Custom Date'
-  );
-
-  if (!customClicked) {
-    console.log('Custom Date option not clicked. Maybe modal is already open.');
+  if (visibleInputs.length < 2) {
+    throw new Error(`Could not find the two visible custom date inputs. Found ${visibleInputs.length}.`);
   }
 
-  await page.waitForTimeout(1500);
+  const fromInput = visibleInputs[0];
+  const toInput = visibleInputs[1];
 
-  const visibleDateInputs = page
-    .locator('input[placeholder="mm/dd/yyyy"], input[type="date"]')
-    .filter({ hasNotText: '' });
+  console.log('Filling MTD from/to date inputs...');
 
-  let inputCount = await visibleDateInputs.count();
-
-  let dateInputs = visibleDateInputs;
-
-  if (inputCount < 2) {
-    dateInputs = page.locator('input[placeholder="mm/dd/yyyy"], input[type="date"], .modal input[type="text"]');
-    inputCount = await dateInputs.count();
-  }
-
-  if (inputCount < 2) {
-    throw new Error('Could not find the two custom date inputs.');
-  }
-
-  const fromInput = dateInputs.nth(0);
-  const toInput = dateInputs.nth(1);
-
-  await fromInput.fill('');
+  await fromInput.click({ force: true });
+  await fromInput.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
   await fromInput.fill(fromText);
 
-  await toInput.fill('');
+  await toInput.click({ force: true });
+  await toInput.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
   await toInput.fill(toText);
 
   await page.waitForTimeout(1000);
@@ -331,6 +368,8 @@ async function setMtdDateRange(page) {
     [
       'button:has-text("Submit")',
       'input[value="Submit"]',
+      'button:has-text("Apply")',
+      'input[value="Apply"]',
       'text=Submit'
     ],
     'date Submit'
