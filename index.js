@@ -192,6 +192,8 @@ function getMtdRangeForIstep() {
   const to = now;
 
   return {
+    fromDateValue: `${from.getFullYear()}-${pad2(from.getMonth() + 1)}-${pad2(from.getDate())}`,
+    toDateValue: `${to.getFullYear()}-${pad2(to.getMonth() + 1)}-${pad2(to.getDate())}`,
     fromText: `${pad2(from.getMonth() + 1)}/${pad2(from.getDate())}/${from.getFullYear()}`,
     toText: `${pad2(to.getMonth() + 1)}/${pad2(to.getDate())}/${to.getFullYear()}`
   };
@@ -264,9 +266,10 @@ async function login(page) {
 }
 
 async function setMtdDateRange(page) {
-  const { fromText, toText } = getMtdRangeForIstep();
+  const { fromDateValue, toDateValue, fromText, toText } = getMtdRangeForIstep();
 
   console.log(`Setting iStep date range to MTD: ${fromText} → ${toText}`);
+  console.log(`HTML date values: ${fromDateValue} → ${toDateValue}`);
 
   let customSelected = false;
 
@@ -292,19 +295,21 @@ async function setMtdDateRange(page) {
       console.log(`Selecting date range option: ${customOption.label}`);
 
       try {
-        await select.selectOption(customOption.value || { label: customOption.label });
+        await select.selectOption(customOption.value);
       } catch {
         await select.selectOption({ label: customOption.label });
       }
 
+      await select.dispatchEvent('input').catch(() => {});
       await select.dispatchEvent('change').catch(() => {});
+
       customSelected = true;
       break;
     }
   }
 
   if (!customSelected) {
-    console.log('Could not select Custom Date from native select. Trying visible custom date option...');
+    console.log('Could not select Custom Date from native select. Trying visible custom option...');
 
     customSelected = await clickFirstAvailable(
       page,
@@ -326,50 +331,32 @@ async function setMtdDateRange(page) {
 
   await page.waitForTimeout(2000);
 
-  const allDateInputs = page.locator(
-    'input[placeholder="mm/dd/yyyy"], input[type="date"], .modal input[type="text"], input[name*="from"], input[name*="to"], input[id*="from"], input[id*="to"]'
-  );
+  const startInput = page.locator('input[type="date"][wire\\:model="startDate"]').first();
+  const endInput = page.locator('input[type="date"][wire\\:model="endDate"]').first();
 
-  const visibleInputs = [];
-  const inputCount = await allDateInputs.count();
-
-  for (let i = 0; i < inputCount; i++) {
-    const input = allDateInputs.nth(i);
-
-    const visible = await input.isVisible().catch(() => false);
-    const enabled = await input.isEnabled().catch(() => false);
-
-    if (visible && enabled) {
-      visibleInputs.push(input);
-    }
+  if (!(await startInput.count()) || !(await endInput.count())) {
+    throw new Error('Could not find startDate/endDate inputs.');
   }
 
-  if (visibleInputs.length < 2) {
-    throw new Error(`Could not find the two visible custom date inputs. Found ${visibleInputs.length}.`);
-  }
+  console.log('Filling MTD startDate/endDate inputs...');
 
-  const fromInput = visibleInputs[0];
-  const toInput = visibleInputs[1];
+  await startInput.fill(fromDateValue);
+  await startInput.dispatchEvent('input').catch(() => {});
+  await startInput.dispatchEvent('change').catch(() => {});
 
-  console.log('Filling MTD from/to date inputs...');
-
-  await fromInput.click({ force: true });
-  await fromInput.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
-  await fromInput.fill(fromText);
-
-  await toInput.click({ force: true });
-  await toInput.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
-  await toInput.fill(toText);
+  await endInput.fill(toDateValue);
+  await endInput.dispatchEvent('input').catch(() => {});
+  await endInput.dispatchEvent('change').catch(() => {});
 
   await page.waitForTimeout(1000);
 
   const submitted = await clickFirstAvailable(
     page,
     [
+      '.modal-content button:has-text("Submit")',
+      'button[wire\\:click="submitDateTime()"]',
       'button:has-text("Submit")',
       'input[value="Submit"]',
-      'button:has-text("Apply")',
-      'input[value="Apply"]',
       'text=Submit'
     ],
     'date Submit'
