@@ -16,7 +16,7 @@ const {
 const RAW_SHEET_NAME = 'Raw_iStep';
 const SUMMARY_SHEET_NAME = 'Summary';
 
-for (const [k, v] of Object.entries({
+for (const [key, value] of Object.entries({
   ISTEP_LOGIN_URL,
   ISTEP_REPORT_URL,
   ISTEP_FILES_URL,
@@ -25,7 +25,7 @@ for (const [k, v] of Object.entries({
   GOOGLE_SHEET_ID,
   GOOGLE_SERVICE_ACCOUNT_JSON
 })) {
-  if (!v) throw new Error(`Missing required secret/env: ${k}`);
+  if (!value) throw new Error(`Missing required secret/env: ${key}`);
 }
 
 function clean(value) {
@@ -43,36 +43,9 @@ function scoreToNumber(value) {
 function parseDate(value) {
   const s = clean(value);
   if (!s || s === '-') return null;
+
   const d = new Date(s.replace(' ', 'T'));
   return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function detectType(subject) {
-  const s = clean(subject).toLowerCase();
-
-  if (isExcludedSubject(subject)) return 'Excluded';
-
-  if (
-    s.includes('new brand setup') ||
-    s.includes('new brand') ||
-    s.includes('brand setup')
-  ) return 'Build';
-
-  if (
-    s.includes('outlet catalogue update request') ||
-    s.includes('catalogue update') ||
-    s.includes('catalog update') ||
-    s.includes('replace menu') ||
-    s.includes('menu replace') ||
-    s.includes('add new item') ||
-    s.includes('add new items') ||
-    s.includes('move item') ||
-    s.includes('move items') ||
-    s.includes('location update') ||
-    s.includes('remove items')
-  ) return 'Update';
-
-  return 'Other';
 }
 
 function isExcludedSubject(subject) {
@@ -86,6 +59,38 @@ function isExcludedSubject(subject) {
   );
 }
 
+function detectType(subject) {
+  const s = clean(subject).toLowerCase();
+
+  if (isExcludedSubject(subject)) return 'Excluded';
+
+  if (
+    s.includes('new brand setup') ||
+    s.includes('new brand') ||
+    s.includes('brand setup')
+  ) {
+    return 'Build';
+  }
+
+  if (
+    s.includes('outlet catalogue update request') ||
+    s.includes('catalogue update') ||
+    s.includes('catalog update') ||
+    s.includes('replace menu') ||
+    s.includes('menu replace') ||
+    s.includes('add new item') ||
+    s.includes('add new items') ||
+    s.includes('move item') ||
+    s.includes('move items') ||
+    s.includes('location update') ||
+    s.includes('remove items')
+  ) {
+    return 'Update';
+  }
+
+  return 'Other';
+}
+
 function normalizeMarket(value) {
   const s = clean(value).toLowerCase();
 
@@ -95,7 +100,9 @@ function normalizeMarket(value) {
     s.includes('abu dhabi') ||
     s.includes('sharjah') ||
     s.includes('al ain')
-  ) return 'UAE';
+  ) {
+    return 'UAE';
+  }
 
   if (
     s.includes('jor') ||
@@ -103,7 +110,9 @@ function normalizeMarket(value) {
     s.includes('amman') ||
     s.includes('irbid') ||
     s.includes('zarqa')
-  ) return 'JOR';
+  ) {
+    return 'JOR';
+  }
 
   return clean(value);
 }
@@ -122,25 +131,41 @@ function fmtPct(value) {
 function uniqueTickets(rows) {
   const map = new Map();
 
-  for (const r of rows) {
-    if (!r.reference) continue;
+  for (const row of rows) {
+    if (!row.reference) continue;
 
-    if (!map.has(r.reference)) {
-      map.set(r.reference, { ...r });
+    if (!map.has(row.reference)) {
+      map.set(row.reference, { ...row });
     } else {
-      const e = map.get(r.reference);
-      e.sentBack = e.sentBack || r.sentBack ? 1 : 0;
+      const existing = map.get(row.reference);
 
-      if (!e.date && r.date) e.date = r.date;
-      if (!e.ticketScore && r.ticketScore) e.ticketScore = r.ticketScore;
-      if (!e.market && r.market) e.market = r.market;
-      if (!e.city && r.city) e.city = r.city;
+      existing.sentBack = existing.sentBack || row.sentBack ? 1 : 0;
 
-      map.set(r.reference, e);
+      if (!existing.date && row.date) existing.date = row.date;
+      if (!existing.dateObj && row.dateObj) existing.dateObj = row.dateObj;
+      if (!existing.ticketScore && row.ticketScore) existing.ticketScore = row.ticketScore;
+      if (!existing.market && row.market) existing.market = row.market;
+      if (!existing.city && row.city) existing.city = row.city;
+
+      map.set(row.reference, existing);
     }
   }
 
   return [...map.values()];
+}
+
+async function clickFirstAvailable(page, selectors, label) {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+
+    if (await locator.count()) {
+      await locator.click({ force: true });
+      console.log(`Clicked ${label} using selector: ${selector}`);
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function login(page) {
@@ -162,51 +187,56 @@ async function login(page) {
   ];
 
   let filledUser = false;
+
   for (const selector of usernameSelectors) {
-    const el = page.locator(selector).first();
-    if (await el.count()) {
-      await el.fill(ISTEP_USERNAME);
+    const input = page.locator(selector).first();
+
+    if (await input.count()) {
+      await input.fill(ISTEP_USERNAME);
       filledUser = true;
       break;
     }
   }
 
-  if (!filledUser) throw new Error('Could not find username input.');
+  if (!filledUser) {
+    throw new Error('Could not find username input.');
+  }
 
   let filledPass = false;
+
   for (const selector of passwordSelectors) {
-    const el = page.locator(selector).first();
-    if (await el.count()) {
-      await el.fill(ISTEP_PASSWORD);
+    const input = page.locator(selector).first();
+
+    if (await input.count()) {
+      await input.fill(ISTEP_PASSWORD);
       filledPass = true;
       break;
     }
   }
 
-  if (!filledPass) throw new Error('Could not find password input.');
-
-  const loginButtons = [
-    'button[type="submit"]',
-    'input[type="submit"]',
-    'button:has-text("Login")',
-    'button:has-text("Log in")',
-    'button:has-text("Sign in")'
-  ];
-
-  let clicked = false;
-  for (const selector of loginButtons) {
-    const el = page.locator(selector).first();
-    if (await el.count()) {
-      await el.click({ force: true });
-      clicked = true;
-      break;
-    }
+  if (!filledPass) {
+    throw new Error('Could not find password input.');
   }
 
-  if (!clicked) await page.keyboard.press('Enter');
+  const clickedLogin = await clickFirstAvailable(
+    page,
+    [
+      'button[type="submit"]',
+      'input[type="submit"]',
+      'button:has-text("Login")',
+      'button:has-text("Log in")',
+      'button:has-text("Sign in")'
+    ],
+    'login'
+  );
+
+  if (!clickedLogin) {
+    await page.keyboard.press('Enter');
+  }
 
   await page.waitForTimeout(5000);
   await page.waitForLoadState('networkidle').catch(() => {});
+
   console.log('Login completed.');
 }
 
@@ -216,51 +246,62 @@ async function selectReportAndExport(page) {
   await page.waitForTimeout(4000);
 
   console.log('Selecting Evaluation...');
+
   const evaluationRadio = page.locator('input[type="radio"]').first();
+
   if (await evaluationRadio.count()) {
     await evaluationRadio.check({ force: true }).catch(async () => {
       await evaluationRadio.click({ force: true });
     });
   } else {
-    const evalText = page.locator('text=Evaluation').first();
-    if (await evalText.count()) await evalText.click({ force: true });
+    const evaluationText = page.locator('text=Evaluation').first();
+
+    if (await evaluationText.count()) {
+      await evaluationText.click({ force: true });
+    }
   }
 
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1200);
 
   console.log('Selecting Overall Evaluation Tickets...');
 
   let selected = false;
   const selects = page.locator('select');
+  const selectCount = await selects.count();
 
-  for (let i = 0; i < await selects.count(); i++) {
-    const s = selects.nth(i);
-    const options = await s.locator('option').allTextContents().catch(() => []);
-    if (options.some(o => clean(o).includes('Overall Evaluation Tickets'))) {
-      await s.selectOption({ label: 'Overall Evaluation Tickets' });
+  for (let i = 0; i < selectCount; i++) {
+    const select = selects.nth(i);
+    const options = await select.locator('option').allTextContents().catch(() => []);
+
+    if (options.some(option => clean(option).includes('Overall Evaluation Tickets'))) {
+      await select.selectOption({ label: 'Overall Evaluation Tickets' });
       selected = true;
+      console.log('Selected Overall Evaluation Tickets using normal select.');
       break;
     }
   }
 
   if (!selected) {
-    const dropdowns = [
+    const dropdownSelectors = [
       'text=--Select--',
       '.select2-selection',
       '.form-select',
       '.form-control'
     ];
 
-    for (const selector of dropdowns) {
-      const d = page.locator(selector).first();
-      if (await d.count()) {
-        await d.click({ force: true }).catch(() => {});
+    for (const selector of dropdownSelectors) {
+      const dropdown = page.locator(selector).first();
+
+      if (await dropdown.count()) {
+        await dropdown.click({ force: true }).catch(() => {});
         await page.waitForTimeout(1000);
 
         const option = page.locator('text=Overall Evaluation Tickets').first();
+
         if (await option.count()) {
           await option.click({ force: true });
           selected = true;
+          console.log('Selected Overall Evaluation Tickets using dropdown click.');
           break;
         }
       }
@@ -268,32 +309,49 @@ async function selectReportAndExport(page) {
   }
 
   if (!selected) {
-    console.log('Report dropdown not selected automatically. Continuing.');
+    console.log('Could not auto-select Overall Evaluation Tickets. Continuing anyway...');
   }
 
   await page.waitForTimeout(1500);
 
   console.log('Clicking Apply...');
-  const apply = page.locator('button:has-text("Apply"), input[value="Apply"], text=Apply').first();
-  if (await apply.count()) {
-    await apply.click({ force: true });
-  } else {
+
+  const clickedApply = await clickFirstAvailable(
+    page,
+    [
+      'button:has-text("Apply")',
+      'input[value="Apply"]',
+      'text=Apply'
+    ],
+    'Apply'
+  );
+
+  if (!clickedApply) {
     throw new Error('Apply button not found.');
   }
 
-  await page.waitForTimeout(8000);
+  console.log('Waiting for report table/export button...');
+  await page.waitForTimeout(10000);
+  await page.waitForLoadState('networkidle').catch(() => {});
 
   console.log('Clicking Export...');
-  const exportBtn = page.locator('button:has-text("Export"), a:has-text("Export"), text=Export').first();
 
-  if (!(await exportBtn.count())) {
+  const clickedExport = await clickFirstAvailable(
+    page,
+    [
+      'button:has-text("Export")',
+      'a:has-text("Export")',
+      'text=Export'
+    ],
+    'Export'
+  );
+
+  if (!clickedExport) {
     throw new Error('Export button not found.');
   }
 
-  await exportBtn.click({ force: true });
-
-  console.log('Export clicked. Waiting for file to be generated...');
-  await page.waitForTimeout(15000);
+  console.log('Export clicked. Waiting for file to generate...');
+  await page.waitForTimeout(20000);
 }
 
 async function downloadLatestExport(page) {
@@ -301,42 +359,51 @@ async function downloadLatestExport(page) {
   await page.goto(ISTEP_FILES_URL, { waitUntil: 'networkidle' });
 
   const expectedName = 'Overall_Evaluation_Tickets';
-  const maxAttempts = 18; // 18 x 20 seconds = 6 minutes
+  const maxAttempts = 18;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(`Checking export file attempt ${attempt}/${maxAttempts}...`);
 
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(4000);
 
     const rows = page.locator('table tbody tr');
     const count = await rows.count();
 
     for (let i = 0; i < count; i++) {
       const row = rows.nth(i);
-      const txt = clean(await row.innerText().catch(() => ''));
+      const rowText = clean(await row.innerText().catch(() => ''));
 
-      if (txt.includes(expectedName)) {
-        console.log('Found latest Overall Evaluation export.');
+      if (rowText.includes(expectedName)) {
+        console.log(`Found export row: ${rowText}`);
 
-        const downloadIcon = row.locator('a, button, i').last();
+        const downloadCandidates = [
+          row.locator('a').last(),
+          row.locator('button').last(),
+          row.locator('i').last()
+        ];
 
-        const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
-        await downloadIcon.click({ force: true });
-        const download = await downloadPromise;
+        for (const candidate of downloadCandidates) {
+          if (await candidate.count()) {
+            const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
+            await candidate.click({ force: true });
 
-        const path = './istep-export.xlsx';
-        await download.saveAs(path);
+            const download = await downloadPromise;
+            const path = './istep-export.xlsx';
 
-        console.log(`Downloaded export to ${path}`);
-        return path;
+            await download.saveAs(path);
+
+            console.log(`Downloaded export to ${path}`);
+            return path;
+          }
+        }
+
+        throw new Error('Found export row but could not click download icon.');
       }
     }
 
-    console.log('File not ready yet. Refreshing...');
-    const refreshBtn = page.locator('button:has(i), button, a').filter({ hasText: '' }).last();
-
+    console.log('File not ready yet. Refreshing File Management...');
     await page.reload({ waitUntil: 'networkidle' }).catch(() => {});
-    await page.waitForTimeout(17000);
+    await page.waitForTimeout(16000);
   }
 
   throw new Error('Latest Overall Evaluation export did not appear after waiting.');
@@ -358,13 +425,18 @@ function parseExportFile(filePath) {
     defval: ''
   });
 
-  if (!matrix.length) throw new Error('Excel file is empty.');
+  if (!matrix.length) {
+    throw new Error('Excel file is empty.');
+  }
 
-  const headerRowIndex = matrix.findIndex(row =>
-    row.map(clean).includes('Reference ID') &&
-    row.map(clean).includes('Subject') &&
-    row.map(clean).includes('Ticket Score')
-  );
+  const headerRowIndex = matrix.findIndex(row => {
+    const cleaned = row.map(clean);
+    return (
+      cleaned.includes('Reference ID') &&
+      cleaned.includes('Subject') &&
+      cleaned.includes('Ticket Score')
+    );
+  });
 
   if (headerRowIndex === -1) {
     throw new Error('Could not find header row in Excel export.');
@@ -379,6 +451,7 @@ function parseExportFile(filePath) {
     reference: idx('Reference ID'),
     subject: idx('Subject'),
     ticketScore: idx('Ticket Score'),
+
     catName: idx('Catalogue Name'),
     catUserId: idx('Catalogue User Id'),
     catSentBack: idx('Catalogue Sent Back To Catalog'),
@@ -386,6 +459,7 @@ function parseExportFile(filePath) {
     catMarket: idx('Catalogue Market'),
     catScore: idx('Catalogue Score'),
     catDate: idx('Catalogue Date & Time'),
+
     studioName: idx('Studio Name'),
     studioUserId: idx('Studio User Id'),
     studioSentBack: idx('Studio Sent Back To Catalog'),
@@ -397,7 +471,7 @@ function parseExportFile(filePath) {
   };
 
   if (indexes.reference === -1 || indexes.subject === -1 || indexes.ticketScore === -1) {
-    console.log(headers.slice(0, 30));
+    console.log('Headers found:', headers.slice(0, 40));
     throw new Error('Required export columns missing.');
   }
 
@@ -405,7 +479,10 @@ function parseExportFile(filePath) {
   let lastSubject = '';
   let lastTicketScore = '';
 
-  const get = (row, i) => i >= 0 ? clean(row[i]) : '';
+  const get = (row, index) => {
+    if (index < 0) return '';
+    return clean(row[index]);
+  };
 
   const rows = [];
 
@@ -437,6 +514,8 @@ function parseExportFile(filePath) {
     const catDate = get(row, indexes.catDate);
     const studioDate = get(row, indexes.studioDate);
 
+    const date = catDate || studioDate;
+
     rows.push({
       reference,
       subject,
@@ -444,8 +523,8 @@ function parseExportFile(filePath) {
       type: detectType(subject),
       market: normalizeMarket(catMarket || studioMarket || subject),
       city: catCity || studioCity,
-      date: catDate || studioDate,
-      dateObj: parseDate(catDate || studioDate),
+      date,
+      dateObj: parseDate(date),
       sentBack: catSentBack > 0 || studioSentBack > 0 ? 1 : 0,
 
       catName: get(row, indexes.catName),
@@ -470,6 +549,7 @@ function parseExportFile(filePath) {
   const unique = uniqueTickets(rows);
 
   console.log(`Parsed ${rows.length} rows, ${unique.length} unique tickets after exclusions.`);
+
   return unique;
 }
 
@@ -483,30 +563,30 @@ function buildSummary(rows) {
   const mtdStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const end = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
 
-  const inRange = (r, start, finish) => {
-    const d = r.dateObj || parseDate(r.date);
+  const inRange = (row, start, finish) => {
+    const d = row.dateObj || parseDate(row.date);
     return d && d >= start && d <= finish;
   };
 
-  const weekRows = rows.filter(r => inRange(r, weekStart, end));
-  const mtdRows = rows.filter(r => inRange(r, mtdStart, end));
+  const weekRows = rows.filter(row => inRange(row, weekStart, end));
+  const mtdRows = rows.filter(row => inRange(row, mtdStart, end));
 
   const metrics = periodRows => {
     const total = periodRows.length;
-    const sentBack = periodRows.filter(r => r.sentBack).length;
+    const sentBack = periodRows.filter(row => row.sentBack).length;
 
     return {
       sentBack,
       sentBackRate: total ? sentBack / total * 100 : null,
-      totalScore: avg(periodRows.map(r => r.ticketScore)),
+      totalScore: avg(periodRows.map(row => row.ticketScore)),
 
-      buildOverall: avg(periodRows.filter(r => r.type === 'Build').map(r => r.ticketScore)),
-      buildUAE: avg(periodRows.filter(r => r.type === 'Build' && r.market === 'UAE').map(r => r.ticketScore)),
-      buildJOR: avg(periodRows.filter(r => r.type === 'Build' && r.market === 'JOR').map(r => r.ticketScore)),
+      buildOverall: avg(periodRows.filter(row => row.type === 'Build').map(row => row.ticketScore)),
+      buildUAE: avg(periodRows.filter(row => row.type === 'Build' && row.market === 'UAE').map(row => row.ticketScore)),
+      buildJOR: avg(periodRows.filter(row => row.type === 'Build' && row.market === 'JOR').map(row => row.ticketScore)),
 
-      updateOverall: avg(periodRows.filter(r => r.type === 'Update').map(r => r.ticketScore)),
-      updateUAE: avg(periodRows.filter(r => r.type === 'Update' && r.market === 'UAE').map(r => r.ticketScore)),
-      updateJOR: avg(periodRows.filter(r => r.type === 'Update' && r.market === 'JOR').map(r => r.ticketScore))
+      updateOverall: avg(periodRows.filter(row => row.type === 'Update').map(row => row.ticketScore)),
+      updateUAE: avg(periodRows.filter(row => row.type === 'Update' && row.market === 'UAE').map(row => row.ticketScore)),
+      updateJOR: avg(periodRows.filter(row => row.type === 'Update' && row.market === 'JOR').map(row => row.ticketScore))
     };
   };
 
@@ -574,30 +654,30 @@ async function updateGoogleSheet(rows) {
 
   const rawValues = [
     rawHeaders,
-    ...rows.map(r => [
-      r.reference,
-      r.subject,
-      r.ticketScore,
-      r.type,
-      r.market,
-      r.city,
-      r.date,
-      r.sentBack,
-      r.catName,
-      r.catUserId,
-      r.catSentBack,
-      r.catCity,
-      r.catMarket,
-      r.catScore,
-      r.catDate,
-      r.studioName,
-      r.studioUserId,
-      r.studioSentBack,
-      r.studioCity,
-      r.studioMarket,
-      r.studioScore,
-      r.studioFormName,
-      r.studioDate,
+    ...rows.map(row => [
+      row.reference,
+      row.subject,
+      row.ticketScore,
+      row.type,
+      row.market,
+      row.city,
+      row.date,
+      row.sentBack,
+      row.catName,
+      row.catUserId,
+      row.catSentBack,
+      row.catCity,
+      row.catMarket,
+      row.catScore,
+      row.catDate,
+      row.studioName,
+      row.studioUserId,
+      row.studioSentBack,
+      row.studioCity,
+      row.studioMarket,
+      row.studioScore,
+      row.studioFormName,
+      row.studioDate,
       updatedAt
     ])
   ];
@@ -613,7 +693,9 @@ async function updateGoogleSheet(rows) {
     spreadsheetId: GOOGLE_SHEET_ID,
     range: `${RAW_SHEET_NAME}!A1`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: { values: rawValues }
+    requestBody: {
+      values: rawValues
+    }
   });
 
   await sheets.spreadsheets.values.clear({
@@ -625,27 +707,37 @@ async function updateGoogleSheet(rows) {
     spreadsheetId: GOOGLE_SHEET_ID,
     range: `${SUMMARY_SHEET_NAME}!A1`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: { values: summaryValues }
+    requestBody: {
+      values: summaryValues
+    }
   });
 
   console.log(`Updated Raw_iStep and Summary with ${rows.length} tickets.`);
 }
 
 async function main() {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true
+  });
 
   const page = await browser.newPage({
-    viewport: { width: 1600, height: 1000 },
+    viewport: {
+      width: 1600,
+      height: 1000
+    },
     acceptDownloads: true
   });
 
   try {
     await login(page);
     await selectReportAndExport(page);
+
     const filePath = await downloadLatestExport(page);
     const rows = parseExportFile(filePath);
 
-    if (!rows.length) throw new Error('No rows after parsing export.');
+    if (!rows.length) {
+      throw new Error('No rows after parsing export.');
+    }
 
     await updateGoogleSheet(rows);
   } catch (error) {
