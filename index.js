@@ -1,9 +1,12 @@
 import { chromium } from 'playwright';
 import { google } from 'googleapis';
+import * as XLSX from 'xlsx';
+import fs from 'fs';
 
 const {
   ISTEP_LOGIN_URL,
   ISTEP_REPORT_URL,
+  ISTEP_FILES_URL,
   ISTEP_USERNAME,
   ISTEP_PASSWORD,
   GOOGLE_SHEET_ID,
@@ -11,45 +14,55 @@ const {
 } = process.env;
 
 const RAW_SHEET_NAME = 'Raw_iStep';
+const SUMMARY_SHEET_NAME = 'Summary';
 
-function required(name, value) {
-  if (!value) throw new Error(`Missing required secret/env: ${name}`);
+for (const [k, v] of Object.entries({
+  ISTEP_LOGIN_URL,
+  ISTEP_REPORT_URL,
+  ISTEP_FILES_URL,
+  ISTEP_USERNAME,
+  ISTEP_PASSWORD,
+  GOOGLE_SHEET_ID,
+  GOOGLE_SERVICE_ACCOUNT_JSON
+})) {
+  if (!v) throw new Error(`Missing required secret/env: ${k}`);
 }
 
-required('ISTEP_LOGIN_URL', ISTEP_LOGIN_URL);
-required('ISTEP_REPORT_URL', ISTEP_REPORT_URL);
-required('ISTEP_USERNAME', ISTEP_USERNAME);
-required('ISTEP_PASSWORD', ISTEP_PASSWORD);
-required('GOOGLE_SHEET_ID', GOOGLE_SHEET_ID);
-required('GOOGLE_SERVICE_ACCOUNT_JSON', GOOGLE_SERVICE_ACCOUNT_JSON);
-
 function clean(value) {
-  return String(value || '')
+  return String(value ?? '')
     .replace(/\s+/g, ' ')
     .replace(/\u00a0/g, ' ')
     .trim();
 }
 
 function scoreToNumber(value) {
-  const n = Number(String(value || '').replace('%', '').trim());
+  const n = Number(clean(value).replace('%', ''));
   return Number.isFinite(n) ? n : '';
 }
 
+function parseDate(value) {
+  const s = clean(value);
+  if (!s || s === '-') return null;
+  const d = new Date(s.replace(' ', 'T'));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function detectType(subject) {
-  const s = String(subject || '').toLowerCase();
+  const s = clean(subject).toLowerCase();
+
+  if (isExcludedSubject(subject)) return 'Excluded';
 
   if (
     s.includes('new brand setup') ||
     s.includes('new brand') ||
     s.includes('brand setup')
-  ) {
-    return 'Build';
-  }
+  ) return 'Build';
 
   if (
     s.includes('outlet catalogue update request') ||
     s.includes('catalogue update') ||
     s.includes('catalog update') ||
+    s.includes('replace menu') ||
     s.includes('menu replace') ||
     s.includes('add new item') ||
     s.includes('add new items') ||
@@ -57,15 +70,24 @@ function detectType(subject) {
     s.includes('move items') ||
     s.includes('location update') ||
     s.includes('remove items')
-  ) {
-    return 'Update';
-  }
+  ) return 'Update';
 
   return 'Other';
 }
 
+function isExcludedSubject(subject) {
+  const s = clean(subject).toLowerCase();
+
+  return (
+    s.includes('new brand setup (shops)') ||
+    s.includes('new outlet for existing brand (shops)') ||
+    s.includes('outlet catalogue update request- shops') ||
+    s.includes('outlet catalogue update request - shops')
+  );
+}
+
 function normalizeMarket(value) {
-  const s = String(value || '').toLowerCase();
+  const s = clean(value).toLowerCase();
 
   if (
     s.includes('uae') ||
@@ -73,9 +95,7 @@ function normalizeMarket(value) {
     s.includes('abu dhabi') ||
     s.includes('sharjah') ||
     s.includes('al ain')
-  ) {
-    return 'UAE';
-  }
+  ) return 'UAE';
 
   if (
     s.includes('jor') ||
@@ -83,11 +103,44 @@ function normalizeMarket(value) {
     s.includes('amman') ||
     s.includes('irbid') ||
     s.includes('zarqa')
-  ) {
-    return 'JOR';
-  }
+  ) return 'JOR';
 
   return clean(value);
+}
+
+function avg(values) {
+  const nums = values.filter(v => typeof v === 'number' && !Number.isNaN(v));
+  if (!nums.length) return null;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+function fmtPct(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return '-';
+  return `${Number(value).toFixed(2).replace(/\.00$/, '')}%`;
+}
+
+function uniqueTickets(rows) {
+  const map = new Map();
+
+  for (const r of rows) {
+    if (!r.reference) continue;
+
+    if (!map.has(r.reference)) {
+      map.set(r.reference, { ...r });
+    } else {
+      const e = map.get(r.reference);
+      e.sentBack = e.sentBack || r.sentBack ? 1 : 0;
+
+      if (!e.date && r.date) e.date = r.date;
+      if (!e.ticketScore && r.ticketScore) e.ticketScore = r.ticketScore;
+      if (!e.market && r.market) e.market = r.market;
+      if (!e.city && r.city) e.city = r.city;
+
+      map.set(r.reference, e);
+    }
+  }
+
+  return [...map.values()];
 }
 
 async function login(page) {
@@ -108,367 +161,368 @@ async function login(page) {
     'input[type="password"]'
   ];
 
-  let usernameFilled = false;
-
+  let filledUser = false;
   for (const selector of usernameSelectors) {
-    const locator = page.locator(selector).first();
-
-    if (await locator.count()) {
-      await locator.fill(ISTEP_USERNAME);
-      usernameFilled = true;
+    const el = page.locator(selector).first();
+    if (await el.count()) {
+      await el.fill(ISTEP_USERNAME);
+      filledUser = true;
       break;
     }
   }
 
-  if (!usernameFilled) {
-    throw new Error('Could not find username/email input on iStep login page.');
-  }
+  if (!filledUser) throw new Error('Could not find username input.');
 
-  let passwordFilled = false;
-
+  let filledPass = false;
   for (const selector of passwordSelectors) {
-    const locator = page.locator(selector).first();
-
-    if (await locator.count()) {
-      await locator.fill(ISTEP_PASSWORD);
-      passwordFilled = true;
+    const el = page.locator(selector).first();
+    if (await el.count()) {
+      await el.fill(ISTEP_PASSWORD);
+      filledPass = true;
       break;
     }
   }
 
-  if (!passwordFilled) {
-    throw new Error('Could not find password input on iStep login page.');
-  }
+  if (!filledPass) throw new Error('Could not find password input.');
 
   const loginButtons = [
     'button[type="submit"]',
     'input[type="submit"]',
     'button:has-text("Login")',
-    'button:has-text("Sign in")',
-    'button:has-text("Log in")'
+    'button:has-text("Log in")',
+    'button:has-text("Sign in")'
   ];
 
   let clicked = false;
-
   for (const selector of loginButtons) {
-    const locator = page.locator(selector).first();
-
-    if (await locator.count()) {
-      await locator.click({ force: true });
+    const el = page.locator(selector).first();
+    if (await el.count()) {
+      await el.click({ force: true });
       clicked = true;
       break;
     }
   }
 
-  if (!clicked) {
-    await page.keyboard.press('Enter');
-  }
+  if (!clicked) await page.keyboard.press('Enter');
 
   await page.waitForTimeout(5000);
   await page.waitForLoadState('networkidle').catch(() => {});
-
-  console.log('Login step completed.');
+  console.log('Login completed.');
 }
 
-async function openReport(page) {
-  console.log('Opening iStep report page...');
+async function selectReportAndExport(page) {
+  console.log('Opening report page...');
   await page.goto(ISTEP_REPORT_URL, { waitUntil: 'networkidle' });
   await page.waitForTimeout(4000);
 
-  console.log('Selecting Evaluation type...');
-
+  console.log('Selecting Evaluation...');
   const evaluationRadio = page.locator('input[type="radio"]').first();
-
   if (await evaluationRadio.count()) {
     await evaluationRadio.check({ force: true }).catch(async () => {
       await evaluationRadio.click({ force: true });
     });
   } else {
-    const evaluationText = page.locator('text=Evaluation').first();
-    if (await evaluationText.count()) {
-      await evaluationText.click({ force: true });
-    }
+    const evalText = page.locator('text=Evaluation').first();
+    if (await evalText.count()) await evalText.click({ force: true });
   }
 
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(1000);
 
   console.log('Selecting Overall Evaluation Tickets...');
 
+  let selected = false;
   const selects = page.locator('select');
-  const selectCount = await selects.count();
 
-  let selectedReport = false;
-
-  for (let i = 0; i < selectCount; i++) {
-    const select = selects.nth(i);
-    const options = await select.locator('option').allTextContents().catch(() => []);
-
+  for (let i = 0; i < await selects.count(); i++) {
+    const s = selects.nth(i);
+    const options = await s.locator('option').allTextContents().catch(() => []);
     if (options.some(o => clean(o).includes('Overall Evaluation Tickets'))) {
-      await select.selectOption({ label: 'Overall Evaluation Tickets' });
-      selectedReport = true;
-      console.log('Selected report using normal select.');
+      await s.selectOption({ label: 'Overall Evaluation Tickets' });
+      selected = true;
       break;
     }
   }
 
-  if (!selectedReport) {
-    const dropdownSelectors = [
-      'select',
+  if (!selected) {
+    const dropdowns = [
       'text=--Select--',
       '.select2-selection',
       '.form-select',
       '.form-control'
     ];
 
-    for (const selector of dropdownSelectors) {
-      const dropdown = page.locator(selector).first();
-
-      if (await dropdown.count()) {
-        await dropdown.click({ force: true }).catch(() => {});
+    for (const selector of dropdowns) {
+      const d = page.locator(selector).first();
+      if (await d.count()) {
+        await d.click({ force: true }).catch(() => {});
         await page.waitForTimeout(1000);
 
         const option = page.locator('text=Overall Evaluation Tickets').first();
-
         if (await option.count()) {
           await option.click({ force: true });
-          selectedReport = true;
-          console.log('Selected report using dropdown click.');
+          selected = true;
           break;
         }
       }
     }
   }
 
-  if (!selectedReport) {
-    console.log('Could not auto-select Overall Evaluation Tickets. Continuing anyway...');
+  if (!selected) {
+    console.log('Report dropdown not selected automatically. Continuing.');
   }
 
   await page.waitForTimeout(1500);
 
   console.log('Clicking Apply...');
-
-  const applySelectors = [
-    'button:has-text("Apply")',
-    'input[value="Apply"]',
-    'text=Apply'
-  ];
-
-  let clickedApply = false;
-
-  for (const selector of applySelectors) {
-    const applyButton = page.locator(selector).first();
-
-    if (await applyButton.count()) {
-      await applyButton.click({ force: true });
-      clickedApply = true;
-      break;
-    }
+  const apply = page.locator('button:has-text("Apply"), input[value="Apply"], text=Apply').first();
+  if (await apply.count()) {
+    await apply.click({ force: true });
+  } else {
+    throw new Error('Apply button not found.');
   }
 
-  if (!clickedApply) {
-    throw new Error('Could not find Apply button.');
+  await page.waitForTimeout(8000);
+
+  console.log('Clicking Export...');
+  const exportBtn = page.locator('button:has-text("Export"), a:has-text("Export"), text=Export').first();
+
+  if (!(await exportBtn.count())) {
+    throw new Error('Export button not found.');
   }
 
-  console.log('Waiting for report table to load...');
+  await exportBtn.click({ force: true });
 
-  await page.waitForTimeout(10000);
-  await page.waitForLoadState('networkidle').catch(() => {});
-
-  const table = page.locator('table#example, table').first();
-  await table.waitFor({ timeout: 60000 });
-
-  console.log('Report table found.');
+  console.log('Export clicked. Waiting for file to be generated...');
+  await page.waitForTimeout(15000);
 }
 
-async function extractTable(page) {
-  console.log('Extracting table...');
+async function downloadLatestExport(page) {
+  console.log('Opening File Management...');
+  await page.goto(ISTEP_FILES_URL, { waitUntil: 'networkidle' });
 
-  const result = await page.evaluate(() => {
-    function cellText(cell) {
-      return (cell.innerText || '')
-        .replace(/\s+/g, ' ')
-        .replace(/\u00a0/g, ' ')
-        .trim();
-    }
+  const expectedName = 'Overall_Evaluation_Tickets';
+  const maxAttempts = 18; // 18 x 20 seconds = 6 minutes
 
-    const table = document.querySelector('table#example') || document.querySelector('table');
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    console.log(`Checking export file attempt ${attempt}/${maxAttempts}...`);
 
-    if (!table) {
-      throw new Error('No table found.');
-    }
+    await page.waitForTimeout(3000);
 
-    const headerCells = Array.from(table.querySelectorAll('thead th')).map(cellText);
+    const rows = page.locator('table tbody tr');
+    const count = await rows.count();
 
-    const bodyRows = Array.from(table.querySelectorAll('tbody tr'));
-    const grid = [];
-    const rowspans = {};
+    for (let i = 0; i < count; i++) {
+      const row = rows.nth(i);
+      const txt = clean(await row.innerText().catch(() => ''));
 
-    bodyRows.forEach((tr) => {
-      const row = [];
-      let colIndex = 0;
+      if (txt.includes(expectedName)) {
+        console.log('Found latest Overall Evaluation export.');
 
-      while (rowspans[colIndex] && rowspans[colIndex].remaining > 0) {
-        row[colIndex] = rowspans[colIndex].value;
-        rowspans[colIndex].remaining -= 1;
+        const downloadIcon = row.locator('a, button, i').last();
 
-        if (rowspans[colIndex].remaining === 0) {
-          delete rowspans[colIndex];
-        }
+        const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
+        await downloadIcon.click({ force: true });
+        const download = await downloadPromise;
 
-        colIndex++;
+        const path = './istep-export.xlsx';
+        await download.saveAs(path);
+
+        console.log(`Downloaded export to ${path}`);
+        return path;
       }
+    }
 
-      const cells = Array.from(tr.querySelectorAll('td'));
+    console.log('File not ready yet. Refreshing...');
+    const refreshBtn = page.locator('button:has(i), button, a').filter({ hasText: '' }).last();
 
-      cells.forEach(td => {
-        while (row[colIndex] !== undefined) colIndex++;
+    await page.reload({ waitUntil: 'networkidle' }).catch(() => {});
+    await page.waitForTimeout(17000);
+  }
 
-        const value = cellText(td);
-        const rowspan = Number(td.getAttribute('rowspan') || '1');
+  throw new Error('Latest Overall Evaluation export did not appear after waiting.');
+}
 
-        row[colIndex] = value;
+function parseExportFile(filePath) {
+  console.log('Parsing Excel export...');
 
-        if (rowspan > 1) {
-          rowspans[colIndex] = {
-            value,
-            remaining: rowspan - 1
-          };
-        }
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Export file not found: ${filePath}`);
+  }
 
-        colIndex++;
-      });
+  const workbook = XLSX.readFile(filePath);
+  const firstSheetName = workbook.SheetNames[0];
+  const sheet = workbook.Sheets[firstSheetName];
 
-      grid.push(row);
-    });
-
-    return {
-      headers: headerCells,
-      rows: grid
-    };
+  const matrix = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    defval: ''
   });
 
-  const headers = result.headers.map(clean);
-  const rows = result.rows;
+  if (!matrix.length) throw new Error('Excel file is empty.');
 
-  console.log('Headers found:', headers.slice(0, 25));
+  const headerRowIndex = matrix.findIndex(row =>
+    row.map(clean).includes('Reference ID') &&
+    row.map(clean).includes('Subject') &&
+    row.map(clean).includes('Ticket Score')
+  );
 
-  const indexOf = (name) => {
-    const wanted = name.toLowerCase();
-    return headers.findIndex(h => h.toLowerCase() === wanted);
-  };
-
-  const idx = {
-    reference: indexOf('Reference ID'),
-    subject: indexOf('Subject'),
-    ticketScore: indexOf('Ticket Score'),
-
-    catName: indexOf('Catalogue Name'),
-    catUserId: indexOf('Catalogue User Id'),
-    catSentBack: indexOf('Catalogue Sent Back To Catalog'),
-    catCity: indexOf('Catalogue City'),
-    catMarket: indexOf('Catalogue Market'),
-    catScore: indexOf('Catalogue Score'),
-    catDate: indexOf('Catalogue Date & Time'),
-
-    studioName: indexOf('Studio Name'),
-    studioUserId: indexOf('Studio User Id'),
-    studioSentBack: indexOf('Studio Sent Back To Catalog'),
-    studioCity: indexOf('Studio City'),
-    studioMarket: indexOf('Studio Market'),
-    studioScore: indexOf('Studio Score'),
-    studioFormName: indexOf('Studio Form Name'),
-    studioDate: indexOf('Studio Date & Time')
-  };
-
-  if (idx.reference === -1 || idx.subject === -1 || idx.ticketScore === -1) {
-    throw new Error('Could not find required columns: Reference ID, Subject, Ticket Score.');
+  if (headerRowIndex === -1) {
+    throw new Error('Could not find header row in Excel export.');
   }
 
-  const get = (row, index) => {
-    if (index === -1 || index === undefined) return '';
-    return clean(row[index]);
+  const headers = matrix[headerRowIndex].map(clean);
+  const dataRows = matrix.slice(headerRowIndex + 1);
+
+  const idx = name => headers.findIndex(h => h.toLowerCase() === name.toLowerCase());
+
+  const indexes = {
+    reference: idx('Reference ID'),
+    subject: idx('Subject'),
+    ticketScore: idx('Ticket Score'),
+    catName: idx('Catalogue Name'),
+    catUserId: idx('Catalogue User Id'),
+    catSentBack: idx('Catalogue Sent Back To Catalog'),
+    catCity: idx('Catalogue City'),
+    catMarket: idx('Catalogue Market'),
+    catScore: idx('Catalogue Score'),
+    catDate: idx('Catalogue Date & Time'),
+    studioName: idx('Studio Name'),
+    studioUserId: idx('Studio User Id'),
+    studioSentBack: idx('Studio Sent Back To Catalog'),
+    studioCity: idx('Studio City'),
+    studioMarket: idx('Studio Market'),
+    studioScore: idx('Studio Score'),
+    studioFormName: idx('Studio Form Name'),
+    studioDate: idx('Studio Date & Time')
   };
 
-  const output = rows
-    .map(r => {
-      const reference = get(r, idx.reference);
-      const subject = get(r, idx.subject);
-
-      const catMarket = get(r, idx.catMarket);
-      const studioMarket = get(r, idx.studioMarket);
-      const catCity = get(r, idx.catCity);
-      const studioCity = get(r, idx.studioCity);
-
-      const market = normalizeMarket(catMarket || studioMarket || subject);
-      const type = detectType(subject);
-
-      const catSentBack = Number(get(r, idx.catSentBack) || 0) || 0;
-      const studioSentBack = Number(get(r, idx.studioSentBack) || 0) || 0;
-
-      const catDate = get(r, idx.catDate);
-      const studioDate = get(r, idx.studioDate);
-
-      return {
-        reference,
-        subject,
-        ticketScore: scoreToNumber(get(r, idx.ticketScore)),
-        type,
-        market,
-        city: catCity || studioCity,
-        date: catDate || studioDate,
-        sentBack: catSentBack > 0 || studioSentBack > 0 ? 1 : 0,
-
-        catName: get(r, idx.catName),
-        catUserId: get(r, idx.catUserId),
-        catSentBack,
-        catCity,
-        catMarket,
-        catScore: scoreToNumber(get(r, idx.catScore)),
-        catDate,
-
-        studioName: get(r, idx.studioName),
-        studioUserId: get(r, idx.studioUserId),
-        studioSentBack,
-        studioCity,
-        studioMarket,
-        studioScore: scoreToNumber(get(r, idx.studioScore)),
-        studioFormName: get(r, idx.studioFormName),
-        studioDate
-      };
-    })
-    .filter(r => r.reference && r.reference.startsWith('TH-'));
-
-  console.log(`Extracted ${output.length} table rows.`);
-
-  return output;
-}
-
-function uniqueTickets(rows) {
-  const map = new Map();
-
-  for (const row of rows) {
-    if (!map.has(row.reference)) {
-      map.set(row.reference, { ...row });
-    } else {
-      const existing = map.get(row.reference);
-
-      existing.sentBack = existing.sentBack || row.sentBack ? 1 : 0;
-
-      if (!existing.date && row.date) existing.date = row.date;
-      if (!existing.ticketScore && row.ticketScore) existing.ticketScore = row.ticketScore;
-      if (!existing.market && row.market) existing.market = row.market;
-      if (!existing.city && row.city) existing.city = row.city;
-
-      map.set(row.reference, existing);
-    }
+  if (indexes.reference === -1 || indexes.subject === -1 || indexes.ticketScore === -1) {
+    console.log(headers.slice(0, 30));
+    throw new Error('Required export columns missing.');
   }
 
-  return Array.from(map.values());
+  let lastReference = '';
+  let lastSubject = '';
+  let lastTicketScore = '';
+
+  const get = (row, i) => i >= 0 ? clean(row[i]) : '';
+
+  const rows = [];
+
+  for (const row of dataRows) {
+    let reference = get(row, indexes.reference);
+    let subject = get(row, indexes.subject);
+    let ticketScoreRaw = get(row, indexes.ticketScore);
+
+    if (!reference && lastReference) reference = lastReference;
+    if (!subject && lastSubject) subject = lastSubject;
+    if (!ticketScoreRaw && lastTicketScore) ticketScoreRaw = lastTicketScore;
+
+    if (!reference || !reference.startsWith('TH-')) continue;
+
+    lastReference = reference;
+    lastSubject = subject;
+    lastTicketScore = ticketScoreRaw;
+
+    if (isExcludedSubject(subject)) continue;
+
+    const catMarket = get(row, indexes.catMarket);
+    const studioMarket = get(row, indexes.studioMarket);
+    const catCity = get(row, indexes.catCity);
+    const studioCity = get(row, indexes.studioCity);
+
+    const catSentBack = Number(get(row, indexes.catSentBack) || 0) || 0;
+    const studioSentBack = Number(get(row, indexes.studioSentBack) || 0) || 0;
+
+    const catDate = get(row, indexes.catDate);
+    const studioDate = get(row, indexes.studioDate);
+
+    rows.push({
+      reference,
+      subject,
+      ticketScore: scoreToNumber(ticketScoreRaw),
+      type: detectType(subject),
+      market: normalizeMarket(catMarket || studioMarket || subject),
+      city: catCity || studioCity,
+      date: catDate || studioDate,
+      dateObj: parseDate(catDate || studioDate),
+      sentBack: catSentBack > 0 || studioSentBack > 0 ? 1 : 0,
+
+      catName: get(row, indexes.catName),
+      catUserId: get(row, indexes.catUserId),
+      catSentBack,
+      catCity,
+      catMarket,
+      catScore: scoreToNumber(get(row, indexes.catScore)),
+      catDate,
+
+      studioName: get(row, indexes.studioName),
+      studioUserId: get(row, indexes.studioUserId),
+      studioSentBack,
+      studioCity,
+      studioMarket,
+      studioScore: scoreToNumber(get(row, indexes.studioScore)),
+      studioFormName: get(row, indexes.studioFormName),
+      studioDate
+    });
+  }
+
+  const unique = uniqueTickets(rows);
+
+  console.log(`Parsed ${rows.length} rows, ${unique.length} unique tickets after exclusions.`);
+  return unique;
 }
 
-async function updateGoogleSheet(rows) {
-  console.log('Updating Google Sheet...');
+function buildSummary(rows) {
+  const now = new Date();
 
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const weekStart = new Date(today);
+  weekStart.setDate(today.getDate() - 6);
+
+  const mtdStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
+
+  const inRange = (r, start, finish) => {
+    const d = r.dateObj || parseDate(r.date);
+    return d && d >= start && d <= finish;
+  };
+
+  const weekRows = rows.filter(r => inRange(r, weekStart, end));
+  const mtdRows = rows.filter(r => inRange(r, mtdStart, end));
+
+  const metrics = periodRows => {
+    const total = periodRows.length;
+    const sentBack = periodRows.filter(r => r.sentBack).length;
+
+    return {
+      sentBack,
+      sentBackRate: total ? sentBack / total * 100 : null,
+      totalScore: avg(periodRows.map(r => r.ticketScore)),
+
+      buildOverall: avg(periodRows.filter(r => r.type === 'Build').map(r => r.ticketScore)),
+      buildUAE: avg(periodRows.filter(r => r.type === 'Build' && r.market === 'UAE').map(r => r.ticketScore)),
+      buildJOR: avg(periodRows.filter(r => r.type === 'Build' && r.market === 'JOR').map(r => r.ticketScore)),
+
+      updateOverall: avg(periodRows.filter(r => r.type === 'Update').map(r => r.ticketScore)),
+      updateUAE: avg(periodRows.filter(r => r.type === 'Update' && r.market === 'UAE').map(r => r.ticketScore)),
+      updateJOR: avg(periodRows.filter(r => r.type === 'Update' && r.market === 'JOR').map(r => r.ticketScore))
+    };
+  };
+
+  const week = metrics(weekRows);
+  const mtd = metrics(mtdRows);
+
+  return [
+    ['Sent back to catalog', `${mtd.sentBack} Tickets - ${fmtPct(mtd.sentBackRate)}`],
+    ['Quality score for Week to date', fmtPct(week.totalScore)],
+    ['MTD Total Score', fmtPct(mtd.totalScore)],
+    ['MTD Build Score', `Overall: ${fmtPct(mtd.buildOverall)} | UAE: ${fmtPct(mtd.buildUAE)} | JOR: ${fmtPct(mtd.buildJOR)}`],
+    ['MTD Update Score', `Overall: ${fmtPct(mtd.updateOverall)} | UAE: ${fmtPct(mtd.updateUAE)} | JOR: ${fmtPct(mtd.updateJOR)}`]
+  ];
+}
+
+async function getSheetsClient() {
   let credentialsText = GOOGLE_SERVICE_ACCOUNT_JSON;
 
   if (!credentialsText.trim().startsWith('{')) {
@@ -482,12 +536,16 @@ async function updateGoogleSheet(rows) {
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   });
 
-  const sheets = google.sheets({
-    version: 'v4',
-    auth
-  });
+  return google.sheets({ version: 'v4', auth });
+}
 
-  const headers = [
+async function updateGoogleSheet(rows) {
+  console.log('Updating Google Sheet...');
+
+  const sheets = await getSheetsClient();
+  const updatedAt = new Date().toISOString();
+
+  const rawHeaders = [
     'Reference ID',
     'Subject',
     'Ticket Score',
@@ -514,12 +572,9 @@ async function updateGoogleSheet(rows) {
     'Updated At'
   ];
 
-  const now = new Date().toISOString();
-  const unique = uniqueTickets(rows);
-
-  const values = [
-    headers,
-    ...unique.map(r => [
+  const rawValues = [
+    rawHeaders,
+    ...rows.map(r => [
       r.reference,
       r.subject,
       r.ticketScore,
@@ -543,9 +598,11 @@ async function updateGoogleSheet(rows) {
       r.studioScore,
       r.studioFormName,
       r.studioDate,
-      now
+      updatedAt
     ])
   ];
+
+  const summaryValues = buildSummary(rows);
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: GOOGLE_SHEET_ID,
@@ -556,35 +613,39 @@ async function updateGoogleSheet(rows) {
     spreadsheetId: GOOGLE_SHEET_ID,
     range: `${RAW_SHEET_NAME}!A1`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values
-    }
+    requestBody: { values: rawValues }
   });
 
-  console.log(`Google Sheet updated with ${unique.length} unique tickets.`);
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range: `${SUMMARY_SHEET_NAME}!A:B`
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range: `${SUMMARY_SHEET_NAME}!A1`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: summaryValues }
+  });
+
+  console.log(`Updated Raw_iStep and Summary with ${rows.length} tickets.`);
 }
 
 async function main() {
-  const browser = await chromium.launch({
-    headless: true
-  });
+  const browser = await chromium.launch({ headless: true });
 
   const page = await browser.newPage({
-    viewport: {
-      width: 1440,
-      height: 1000
-    }
+    viewport: { width: 1600, height: 1000 },
+    acceptDownloads: true
   });
 
   try {
     await login(page);
-    await openReport(page);
+    await selectReportAndExport(page);
+    const filePath = await downloadLatestExport(page);
+    const rows = parseExportFile(filePath);
 
-    const rows = await extractTable(page);
-
-    if (!rows.length) {
-      throw new Error('No iStep rows extracted.');
-    }
+    if (!rows.length) throw new Error('No rows after parsing export.');
 
     await updateGoogleSheet(rows);
   } catch (error) {
