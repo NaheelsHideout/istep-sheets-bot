@@ -6,9 +6,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@googleapis/sheets": "^9.3.0",
-    "google-auth-library": "^9.15.1",
+    "googleapis": "^144.0.0",
     "playwright": "^1.49.1"
-  },
-  "devDependencies": {}
+  }
 }
