@@ -109,8 +109,10 @@ async function login(page) {
   ];
 
   let usernameFilled = false;
+
   for (const selector of usernameSelectors) {
     const locator = page.locator(selector).first();
+
     if (await locator.count()) {
       await locator.fill(ISTEP_USERNAME);
       usernameFilled = true;
@@ -123,8 +125,10 @@ async function login(page) {
   }
 
   let passwordFilled = false;
+
   for (const selector of passwordSelectors) {
     const locator = page.locator(selector).first();
+
     if (await locator.count()) {
       await locator.fill(ISTEP_PASSWORD);
       passwordFilled = true;
@@ -140,17 +144,17 @@ async function login(page) {
     'button[type="submit"]',
     'input[type="submit"]',
     'button:has-text("Login")',
-    'button:has-text("Sign in")'
+    'button:has-text("Sign in")',
+    'button:has-text("Log in")'
   ];
 
   let clicked = false;
+
   for (const selector of loginButtons) {
     const locator = page.locator(selector).first();
+
     if (await locator.count()) {
-      await Promise.all([
-        page.waitForLoadState('networkidle').catch(() => {}),
-        locator.click()
-      ]);
+      await locator.click({ force: true });
       clicked = true;
       break;
     }
@@ -158,8 +162,10 @@ async function login(page) {
 
   if (!clicked) {
     await page.keyboard.press('Enter');
-    await page.waitForLoadState('networkidle').catch(() => {});
   }
+
+  await page.waitForTimeout(5000);
+  await page.waitForLoadState('networkidle').catch(() => {});
 
   console.log('Login step completed.');
 }
@@ -167,12 +173,109 @@ async function login(page) {
 async function openReport(page) {
   console.log('Opening iStep report page...');
   await page.goto(ISTEP_REPORT_URL, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(4000);
 
-  // Give Livewire/table time to render.
-  await page.waitForTimeout(5000);
+  console.log('Selecting Evaluation type...');
+
+  const evaluationRadio = page.locator('input[type="radio"]').first();
+
+  if (await evaluationRadio.count()) {
+    await evaluationRadio.check({ force: true }).catch(async () => {
+      await evaluationRadio.click({ force: true });
+    });
+  } else {
+    const evaluationText = page.locator('text=Evaluation').first();
+    if (await evaluationText.count()) {
+      await evaluationText.click({ force: true });
+    }
+  }
+
+  await page.waitForTimeout(1500);
+
+  console.log('Selecting Overall Evaluation Tickets...');
+
+  const selects = page.locator('select');
+  const selectCount = await selects.count();
+
+  let selectedReport = false;
+
+  for (let i = 0; i < selectCount; i++) {
+    const select = selects.nth(i);
+    const options = await select.locator('option').allTextContents().catch(() => []);
+
+    if (options.some(o => clean(o).includes('Overall Evaluation Tickets'))) {
+      await select.selectOption({ label: 'Overall Evaluation Tickets' });
+      selectedReport = true;
+      console.log('Selected report using normal select.');
+      break;
+    }
+  }
+
+  if (!selectedReport) {
+    const dropdownSelectors = [
+      'select',
+      'text=--Select--',
+      '.select2-selection',
+      '.form-select',
+      '.form-control'
+    ];
+
+    for (const selector of dropdownSelectors) {
+      const dropdown = page.locator(selector).first();
+
+      if (await dropdown.count()) {
+        await dropdown.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(1000);
+
+        const option = page.locator('text=Overall Evaluation Tickets').first();
+
+        if (await option.count()) {
+          await option.click({ force: true });
+          selectedReport = true;
+          console.log('Selected report using dropdown click.');
+          break;
+        }
+      }
+    }
+  }
+
+  if (!selectedReport) {
+    console.log('Could not auto-select Overall Evaluation Tickets. Continuing anyway...');
+  }
+
+  await page.waitForTimeout(1500);
+
+  console.log('Clicking Apply...');
+
+  const applySelectors = [
+    'button:has-text("Apply")',
+    'input[value="Apply"]',
+    'text=Apply'
+  ];
+
+  let clickedApply = false;
+
+  for (const selector of applySelectors) {
+    const applyButton = page.locator(selector).first();
+
+    if (await applyButton.count()) {
+      await applyButton.click({ force: true });
+      clickedApply = true;
+      break;
+    }
+  }
+
+  if (!clickedApply) {
+    throw new Error('Could not find Apply button.');
+  }
+
+  console.log('Waiting for report table to load...');
+
+  await page.waitForTimeout(10000);
+  await page.waitForLoadState('networkidle').catch(() => {});
 
   const table = page.locator('table#example, table').first();
-  await table.waitFor({ timeout: 30000 });
+  await table.waitFor({ timeout: 60000 });
 
   console.log('Report table found.');
 }
@@ -189,7 +292,10 @@ async function extractTable(page) {
     }
 
     const table = document.querySelector('table#example') || document.querySelector('table');
-    if (!table) throw new Error('No table found.');
+
+    if (!table) {
+      throw new Error('No table found.');
+    }
 
     const headerCells = Array.from(table.querySelectorAll('thead th')).map(cellText);
 
@@ -197,14 +303,18 @@ async function extractTable(page) {
     const grid = [];
     const rowspans = {};
 
-    bodyRows.forEach((tr, rowIndex) => {
+    bodyRows.forEach((tr) => {
       const row = [];
       let colIndex = 0;
 
       while (rowspans[colIndex] && rowspans[colIndex].remaining > 0) {
         row[colIndex] = rowspans[colIndex].value;
         rowspans[colIndex].remaining -= 1;
-        if (rowspans[colIndex].remaining === 0) delete rowspans[colIndex];
+
+        if (rowspans[colIndex].remaining === 0) {
+          delete rowspans[colIndex];
+        }
+
         colIndex++;
       }
 
@@ -231,11 +341,16 @@ async function extractTable(page) {
       grid.push(row);
     });
 
-    return { headers: headerCells, rows: grid };
+    return {
+      headers: headerCells,
+      rows: grid
+    };
   });
 
   const headers = result.headers.map(clean);
   const rows = result.rows;
+
+  console.log('Headers found:', headers.slice(0, 25));
 
   const indexOf = (name) => {
     const wanted = name.toLowerCase();
@@ -246,6 +361,7 @@ async function extractTable(page) {
     reference: indexOf('Reference ID'),
     subject: indexOf('Subject'),
     ticketScore: indexOf('Ticket Score'),
+
     catName: indexOf('Catalogue Name'),
     catUserId: indexOf('Catalogue User Id'),
     catSentBack: indexOf('Catalogue Sent Back To Catalog'),
@@ -253,6 +369,7 @@ async function extractTable(page) {
     catMarket: indexOf('Catalogue Market'),
     catScore: indexOf('Catalogue Score'),
     catDate: indexOf('Catalogue Date & Time'),
+
     studioName: indexOf('Studio Name'),
     studioUserId: indexOf('Studio User Id'),
     studioSentBack: indexOf('Studio Sent Back To Catalog'),
@@ -264,55 +381,65 @@ async function extractTable(page) {
   };
 
   if (idx.reference === -1 || idx.subject === -1 || idx.ticketScore === -1) {
-    console.log('Headers found:', headers);
     throw new Error('Could not find required columns: Reference ID, Subject, Ticket Score.');
   }
 
+  const get = (row, index) => {
+    if (index === -1 || index === undefined) return '';
+    return clean(row[index]);
+  };
+
   const output = rows
     .map(r => {
-      const subject = clean(r[idx.subject]);
-      const catMarket = clean(r[idx.catMarket]);
-      const studioMarket = clean(r[idx.studioMarket]);
-      const catCity = clean(r[idx.catCity]);
-      const studioCity = clean(r[idx.studioCity]);
+      const reference = get(r, idx.reference);
+      const subject = get(r, idx.subject);
+
+      const catMarket = get(r, idx.catMarket);
+      const studioMarket = get(r, idx.studioMarket);
+      const catCity = get(r, idx.catCity);
+      const studioCity = get(r, idx.studioCity);
 
       const market = normalizeMarket(catMarket || studioMarket || subject);
       const type = detectType(subject);
 
-      const catSentBack = Number(clean(r[idx.catSentBack]) || 0) || 0;
-      const studioSentBack = Number(clean(r[idx.studioSentBack]) || 0) || 0;
+      const catSentBack = Number(get(r, idx.catSentBack) || 0) || 0;
+      const studioSentBack = Number(get(r, idx.studioSentBack) || 0) || 0;
+
+      const catDate = get(r, idx.catDate);
+      const studioDate = get(r, idx.studioDate);
 
       return {
-        reference: clean(r[idx.reference]),
+        reference,
         subject,
-        ticketScore: scoreToNumber(r[idx.ticketScore]),
+        ticketScore: scoreToNumber(get(r, idx.ticketScore)),
         type,
         market,
         city: catCity || studioCity,
-        date: clean(r[idx.catDate]) || clean(r[idx.studioDate]),
+        date: catDate || studioDate,
         sentBack: catSentBack > 0 || studioSentBack > 0 ? 1 : 0,
 
-        catName: clean(r[idx.catName]),
-        catUserId: clean(r[idx.catUserId]),
+        catName: get(r, idx.catName),
+        catUserId: get(r, idx.catUserId),
         catSentBack,
         catCity,
         catMarket,
-        catScore: scoreToNumber(r[idx.catScore]),
-        catDate: clean(r[idx.catDate]),
+        catScore: scoreToNumber(get(r, idx.catScore)),
+        catDate,
 
-        studioName: clean(r[idx.studioName]),
-        studioUserId: clean(r[idx.studioUserId]),
+        studioName: get(r, idx.studioName),
+        studioUserId: get(r, idx.studioUserId),
         studioSentBack,
         studioCity,
         studioMarket,
-        studioScore: scoreToNumber(r[idx.studioScore]),
-        studioFormName: clean(r[idx.studioFormName]),
-        studioDate: clean(r[idx.studioDate])
+        studioScore: scoreToNumber(get(r, idx.studioScore)),
+        studioFormName: get(r, idx.studioFormName),
+        studioDate
       };
     })
     .filter(r => r.reference && r.reference.startsWith('TH-'));
 
   console.log(`Extracted ${output.length} table rows.`);
+
   return output;
 }
 
@@ -324,6 +451,7 @@ function uniqueTickets(rows) {
       map.set(row.reference, { ...row });
     } else {
       const existing = map.get(row.reference);
+
       existing.sentBack = existing.sentBack || row.sentBack ? 1 : 0;
 
       if (!existing.date && row.date) existing.date = row.date;
@@ -343,7 +471,6 @@ async function updateGoogleSheet(rows) {
 
   let credentialsText = GOOGLE_SERVICE_ACCOUNT_JSON;
 
-  // Allows either raw JSON or base64 JSON.
   if (!credentialsText.trim().startsWith('{')) {
     credentialsText = Buffer.from(credentialsText, 'base64').toString('utf8');
   }
@@ -355,7 +482,10 @@ async function updateGoogleSheet(rows) {
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   });
 
-  const sheets = google.sheets({ version: 'v4', auth });
+  const sheets = google.sheets({
+    version: 'v4',
+    auth
+  });
 
   const headers = [
     'Reference ID',
@@ -385,7 +515,6 @@ async function updateGoogleSheet(rows) {
   ];
 
   const now = new Date().toISOString();
-
   const unique = uniqueTickets(rows);
 
   const values = [
@@ -427,7 +556,9 @@ async function updateGoogleSheet(rows) {
     spreadsheetId: GOOGLE_SHEET_ID,
     range: `${RAW_SHEET_NAME}!A1`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: { values }
+    requestBody: {
+      values
+    }
   });
 
   console.log(`Google Sheet updated with ${unique.length} unique tickets.`);
@@ -439,7 +570,10 @@ async function main() {
   });
 
   const page = await browser.newPage({
-    viewport: { width: 1440, height: 1000 }
+    viewport: {
+      width: 1440,
+      height: 1000
+    }
   });
 
   try {
@@ -455,7 +589,12 @@ async function main() {
     await updateGoogleSheet(rows);
   } catch (error) {
     console.error('Bot failed:', error.message);
-    await page.screenshot({ path: 'istep-error.png', fullPage: true }).catch(() => {});
+
+    await page.screenshot({
+      path: 'istep-error.png',
+      fullPage: true
+    }).catch(() => {});
+
     throw error;
   } finally {
     await browser.close();
