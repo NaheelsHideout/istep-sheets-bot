@@ -32,7 +32,7 @@ jobs:
           ISTEP_PASSWORD: ${{ secrets.ISTEP_PASSWORD }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-
+          ISTEP_FILES_URL: ${{ secrets.ISTEP_FILES_URL }}
       - name: Upload error screenshot
         if: failure()
         uses: actions/upload-artifact@v4
