@@ -1,7 +1,9 @@
 import { chromium } from 'playwright';
 import { google } from 'googleapis';
-import * as XLSX from 'xlsx';
+import XLSX from 'xlsx';
 import fs from 'fs';
+
+process.env.TZ = 'Asia/Amman';
 
 const {
   ISTEP_LOGIN_URL,
@@ -35,6 +37,10 @@ function clean(value) {
     .trim();
 }
 
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
 function scoreToNumber(value) {
   const n = Number(clean(value).replace('%', ''));
   return Number.isFinite(n) ? n : '';
@@ -43,6 +49,12 @@ function scoreToNumber(value) {
 function parseDate(value) {
   const s = clean(value);
   if (!s || s === '-') return null;
+
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const d = new Date(excelEpoch.getTime() + Number(s) * 24 * 60 * 60 * 1000);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
 
   const d = new Date(s.replace(' ', 'T'));
   return Number.isNaN(d.getTime()) ? null : d;
@@ -168,6 +180,17 @@ async function clickFirstAvailable(page, selectors, label) {
   return false;
 }
 
+function getMtdRangeForIstep() {
+  const now = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth(), 1);
+  const to = now;
+
+  return {
+    fromText: `${pad2(from.getMonth() + 1)}/${pad2(from.getDate())}/${from.getFullYear()}`,
+    toText: `${pad2(to.getMonth() + 1)}/${pad2(to.getDate())}/${to.getFullYear()}`
+  };
+}
+
 async function login(page) {
   console.log('Opening iStep login page...');
   await page.goto(ISTEP_LOGIN_URL, { waitUntil: 'networkidle' });
@@ -198,9 +221,7 @@ async function login(page) {
     }
   }
 
-  if (!filledUser) {
-    throw new Error('Could not find username input.');
-  }
+  if (!filledUser) throw new Error('Could not find username input.');
 
   let filledPass = false;
 
@@ -214,9 +235,7 @@ async function login(page) {
     }
   }
 
-  if (!filledPass) {
-    throw new Error('Could not find password input.');
-  }
+  if (!filledPass) throw new Error('Could not find password input.');
 
   const clickedLogin = await clickFirstAvailable(
     page,
@@ -230,14 +249,98 @@ async function login(page) {
     'login'
   );
 
-  if (!clickedLogin) {
-    await page.keyboard.press('Enter');
-  }
+  if (!clickedLogin) await page.keyboard.press('Enter');
 
   await page.waitForTimeout(5000);
   await page.waitForLoadState('networkidle').catch(() => {});
 
   console.log('Login completed.');
+}
+
+async function setMtdDateRange(page) {
+  const { fromText, toText } = getMtdRangeForIstep();
+
+  console.log(`Setting iStep date range to MTD: ${fromText} → ${toText}`);
+
+  const opened = await clickFirstAvailable(
+    page,
+    [
+      'text=Last 24 Hours',
+      'button:has-text("Last 24 Hours")',
+      'input[value="Last 24 Hours"]',
+      'div:has-text("Last 24 Hours")'
+    ],
+    'date dropdown'
+  );
+
+  if (!opened) {
+    console.log('Could not click Last 24 Hours directly. Continuing to look for custom date modal/options...');
+  }
+
+  await page.waitForTimeout(1500);
+
+  const customClicked = await clickFirstAvailable(
+    page,
+    [
+      'text=Custom Date',
+      'text=Custom',
+      'button:has-text("Custom Date")',
+      'button:has-text("Custom")',
+      'a:has-text("Custom Date")',
+      'a:has-text("Custom")'
+    ],
+    'Custom Date'
+  );
+
+  if (!customClicked) {
+    console.log('Custom Date option not clicked. Maybe modal is already open.');
+  }
+
+  await page.waitForTimeout(1500);
+
+  const visibleDateInputs = page
+    .locator('input[placeholder="mm/dd/yyyy"], input[type="date"]')
+    .filter({ hasNotText: '' });
+
+  let inputCount = await visibleDateInputs.count();
+
+  let dateInputs = visibleDateInputs;
+
+  if (inputCount < 2) {
+    dateInputs = page.locator('input[placeholder="mm/dd/yyyy"], input[type="date"], .modal input[type="text"]');
+    inputCount = await dateInputs.count();
+  }
+
+  if (inputCount < 2) {
+    throw new Error('Could not find the two custom date inputs.');
+  }
+
+  const fromInput = dateInputs.nth(0);
+  const toInput = dateInputs.nth(1);
+
+  await fromInput.fill('');
+  await fromInput.fill(fromText);
+
+  await toInput.fill('');
+  await toInput.fill(toText);
+
+  await page.waitForTimeout(1000);
+
+  const submitted = await clickFirstAvailable(
+    page,
+    [
+      'button:has-text("Submit")',
+      'input[value="Submit"]',
+      'text=Submit'
+    ],
+    'date Submit'
+  );
+
+  if (!submitted) {
+    throw new Error('Could not click Submit on custom date modal.');
+  }
+
+  await page.waitForTimeout(4000);
 }
 
 async function selectReportAndExport(page) {
@@ -314,6 +417,8 @@ async function selectReportAndExport(page) {
 
   await page.waitForTimeout(1500);
 
+  await setMtdDateRange(page);
+
   console.log('Clicking Apply...');
 
   const clickedApply = await clickFirstAvailable(
@@ -326,9 +431,7 @@ async function selectReportAndExport(page) {
     'Apply'
   );
 
-  if (!clickedApply) {
-    throw new Error('Apply button not found.');
-  }
+  if (!clickedApply) throw new Error('Apply button not found.');
 
   console.log('Waiting for report table/export button...');
   await page.waitForTimeout(10000);
@@ -346,9 +449,7 @@ async function selectReportAndExport(page) {
     'Export'
   );
 
-  if (!clickedExport) {
-    throw new Error('Export button not found.');
-  }
+  if (!clickedExport) throw new Error('Export button not found.');
 
   console.log('Export clicked. Waiting for file to generate...');
   await page.waitForTimeout(20000);
@@ -416,18 +517,18 @@ function parseExportFile(filePath) {
     throw new Error(`Export file not found: ${filePath}`);
   }
 
-  const workbook = XLSX.readFile(filePath);
+  const fileBuffer = fs.readFileSync(filePath);
+  const workbook = XLSX.read(fileBuffer, { type: 'buffer', cellDates: false });
   const firstSheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[firstSheetName];
 
   const matrix = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
-    defval: ''
+    defval: '',
+    raw: false
   });
 
-  if (!matrix.length) {
-    throw new Error('Excel file is empty.');
-  }
+  if (!matrix.length) throw new Error('Excel file is empty.');
 
   const headerRowIndex = matrix.findIndex(row => {
     const cleaned = row.map(clean);
@@ -557,11 +658,15 @@ function buildSummary(rows) {
   const now = new Date();
 
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
   const weekStart = new Date(today);
-  weekStart.setDate(today.getDate() - 6);
+  weekStart.setDate(today.getDate() - today.getDay());
 
   const mtdStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const end = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
+
+  console.log(`Summary WTD range: ${weekStart.toISOString()} → ${end.toISOString()}`);
+  console.log(`Summary MTD range: ${mtdStart.toISOString()} → ${end.toISOString()}`);
 
   const inRange = (row, start, finish) => {
     const d = row.dateObj || parseDate(row.date);
@@ -576,6 +681,7 @@ function buildSummary(rows) {
     const sentBack = periodRows.filter(row => row.sentBack).length;
 
     return {
+      total,
       sentBack,
       sentBackRate: total ? sentBack / total * 100 : null,
       totalScore: avg(periodRows.map(row => row.ticketScore)),
@@ -693,9 +799,7 @@ async function updateGoogleSheet(rows) {
     spreadsheetId: GOOGLE_SHEET_ID,
     range: `${RAW_SHEET_NAME}!A1`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: rawValues
-    }
+    requestBody: { values: rawValues }
   });
 
   await sheets.spreadsheets.values.clear({
@@ -707,9 +811,7 @@ async function updateGoogleSheet(rows) {
     spreadsheetId: GOOGLE_SHEET_ID,
     range: `${SUMMARY_SHEET_NAME}!A1`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: summaryValues
-    }
+    requestBody: { values: summaryValues }
   });
 
   console.log(`Updated Raw_iStep and Summary with ${rows.length} tickets.`);
